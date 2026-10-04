@@ -177,7 +177,12 @@ fn parse_field(token: &str, field: &'static str, min: u8, max: u8) -> Result<Cro
         let mut v = start;
         while v <= end {
             values.insert(normalise(field, v));
-            v += step;
+            // `v + step` can exceed u8::MAX (e.g. `10/250`); stop rather than
+            // overflow, since anything past u8::MAX is past `end` anyway.
+            let Some(next) = v.checked_add(step) else {
+                break;
+            };
+            v = next;
         }
     }
 
@@ -336,5 +341,158 @@ mod tests {
             CronSchedule::parse("5-1 * * * *"),
             Err(CronError::Malformed { .. })
         ));
+    }
+
+    fn values(field: &CronField) -> Vec<u8> {
+        field.values.iter().copied().collect()
+    }
+
+    #[test]
+    fn parsed_fields_hold_exactly_the_expected_values() {
+        let s = schedule("*/15 9-11,17 1-3,7 */6 1-5");
+        assert_eq!(values(&s.minute), [0, 15, 30, 45]);
+        assert_eq!(values(&s.hour), [9, 10, 11, 17]);
+        assert_eq!(values(&s.day_of_month), [1, 2, 3, 7]);
+        assert_eq!(values(&s.month), [1, 7]);
+        assert_eq!(values(&s.day_of_week), [1, 2, 3, 4, 5]);
+        assert!(!s.minute.any && !s.day_of_week.any);
+        assert!(schedule("* * * * *").minute.any);
+    }
+
+    #[test]
+    fn stepped_range_starts_at_its_lower_bound() {
+        let s = schedule("0-30/10 * * * *");
+        assert_eq!(values(&s.minute), [0, 10, 20, 30]);
+    }
+
+    #[test]
+    fn step_larger_than_u8_headroom_does_not_overflow() {
+        // 10 + 250 overflows u8; parsing must stop rather than panic (debug)
+        // or wrap round and match phantom values (release).
+        let s = schedule("10/250 * * * *");
+        assert_eq!(values(&s.minute), [10]);
+    }
+
+    #[test]
+    fn values_at_both_bounds_of_every_field_are_accepted() {
+        let low = schedule("0 0 1 1 0");
+        assert_eq!(values(&low.minute), [0]);
+        assert_eq!(values(&low.hour), [0]);
+        assert_eq!(values(&low.day_of_month), [1]);
+        assert_eq!(values(&low.month), [1]);
+        assert_eq!(values(&low.day_of_week), [0]);
+
+        let high = schedule("59 23 31 12 6");
+        assert_eq!(values(&high.minute), [59]);
+        assert_eq!(values(&high.hour), [23]);
+        assert_eq!(values(&high.day_of_month), [31]);
+        assert_eq!(values(&high.month), [12]);
+        assert_eq!(values(&high.day_of_week), [6]);
+
+        // Day-of-week 7 is accepted and folded onto Sunday (0).
+        assert_eq!(values(&schedule("* * * * 7").day_of_week), [0]);
+    }
+
+    #[test]
+    fn only_day_of_week_is_folded_so_other_fields_keep_seven() {
+        let s = schedule("7 7 7 7 *");
+        assert_eq!(values(&s.minute), [7]);
+        assert_eq!(values(&s.hour), [7]);
+        assert_eq!(values(&s.day_of_month), [7]);
+        assert_eq!(values(&s.month), [7]);
+    }
+
+    #[test]
+    fn below_minimum_is_rejected_with_the_full_range_reported() {
+        assert_eq!(
+            CronSchedule::parse("* * 0 * *"),
+            Err(CronError::OutOfRange {
+                field: "day-of-month",
+                value: 0,
+                min: 1,
+                max: 31,
+            })
+        );
+        assert_eq!(
+            CronSchedule::parse("* * * 0 *"),
+            Err(CronError::OutOfRange {
+                field: "month",
+                value: 0,
+                min: 1,
+                max: 12,
+            })
+        );
+        assert_eq!(
+            CronSchedule::parse("* * * * 8"),
+            Err(CronError::OutOfRange {
+                field: "day-of-week",
+                value: 8,
+                min: 0,
+                max: 7,
+            })
+        );
+    }
+
+    #[test]
+    fn malformed_error_names_the_field_and_token() {
+        assert_eq!(
+            CronSchedule::parse("* * * * abc"),
+            Err(CronError::Malformed {
+                field: "day-of-week",
+                token: "abc".to_string(),
+            })
+        );
+        assert_eq!(
+            CronSchedule::parse("*/x * * * *"),
+            Err(CronError::Malformed {
+                field: "minute",
+                token: "*/x".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn every_weekday_maps_to_its_cron_number() {
+        // 2026-08-16 is a Sunday, so 16 + n is weekday n (Sunday = 0).
+        for dow in 0..=6u8 {
+            let s = schedule(&format!("0 0 * * {dow}"));
+            for offset in 0..=6u8 {
+                assert_eq!(
+                    s.matches(utc(2026, 8, 16 + offset, 0, 0)),
+                    offset == dow,
+                    "schedule dow {dow} against weekday {offset}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn day_of_month_alone_restricts_the_day() {
+        let s = schedule("0 0 16 * *");
+        assert!(s.matches(utc(2026, 8, 16, 0, 0)));
+        assert!(!s.matches(utc(2026, 8, 17, 0, 0)));
+    }
+
+    #[test]
+    fn every_field_must_match_independently() {
+        // 2026-06-15 is a Monday; day-of-week is `*` so only the four
+        // other fields are in play.
+        let s = schedule("30 12 15 6 *");
+        assert!(s.matches(utc(2026, 6, 15, 12, 30)));
+        assert!(!s.matches(utc(2026, 6, 15, 12, 31)), "minute");
+        assert!(!s.matches(utc(2026, 6, 15, 13, 30)), "hour");
+        assert!(!s.matches(utc(2026, 6, 16, 12, 30)), "day of month");
+        assert!(!s.matches(utc(2026, 7, 15, 12, 30)), "month");
+    }
+
+    #[test]
+    fn day_of_week_must_match_alongside_the_other_fields() {
+        // 2026-06-15 is a Monday.
+        let s = schedule("30 12 * 6 1");
+        assert!(s.matches(utc(2026, 6, 15, 12, 30)));
+        assert!(!s.matches(utc(2026, 6, 15, 12, 31)), "minute");
+        assert!(!s.matches(utc(2026, 6, 15, 13, 30)), "hour");
+        assert!(!s.matches(utc(2026, 7, 13, 12, 30)), "month (also a Monday)");
+        assert!(!s.matches(utc(2026, 6, 16, 12, 30)), "weekday");
     }
 }

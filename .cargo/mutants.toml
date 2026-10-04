@@ -1,0 +1,24 @@
+# cargo-mutants configuration (https://mutants.rs).
+#
+# Mutation testing is driven piecemeal, one bounded module at a time, because
+# the crate is large. `examine_globs` is the list of modules currently under
+# mutation; the target is zero surviving mutants in each. Add a module here
+# (and extend the test filter below) once the previous one reaches zero.
+#
+# Run with:  make mutants
+examine_globs = ["src/meat/cron.rs"]
+
+# Only run the unit tests of the module under mutation. The filter is a
+# substring match on the test path, so keep it in step with examine_globs.
+additional_cargo_test_args = ["meat::cron::"]
+
+# `--lib` applies to the build phase too (`cargo test --no-run`), so only the
+# library's unit-test binary is built and linked. Without it every integration
+# test and bin links the whole crate and the linker is OOM-killed.
+#
+# The crate is huge: no debuginfo and a job cap keep rustc's peak memory down;
+# mutation runs never need a debugger.
+additional_cargo_args = ["--lib", "--config", "profile.dev.debug=0", "--jobs", "2"]
+
+# Skip the `Debug`/`Display` plumbing derived by thiserror.
+exclude_re = ["impl (Debug|Display)"]

@@ -1,4 +1,4 @@
-.PHONY: build test test-cargo test-doc test-slow test-images test-linux test-rootless-runc test-cluster test-upgrade test-upgrade-node test-upgrade-cluster test-apple test-standard-clients test-gpu test-s3 test-ci-scripts check-ignored coverage check fmt lint audit clean pdf loc help bench bench-large pickle-test-macos ci ci-bench observability-demo kubernetes-demo toml-demo readme-commands
+.PHONY: build test test-cargo test-doc test-slow test-images test-linux test-rootless-runc test-cluster test-upgrade test-upgrade-node test-upgrade-cluster test-apple test-standard-clients test-gpu test-s3 test-ci-scripts check-ignored coverage mutants check fmt lint audit clean pdf loc help bench bench-large pickle-test-macos ci ci-bench observability-demo kubernetes-demo toml-demo readme-commands
 
 CARGO = cargo
 NEXTEST_PROFILE ?= default
@@ -111,6 +111,9 @@ coverage: ## Run the portable suite once under line coverage and enforce the flo
 	$(COVERAGE_REPORT) --lcov --output-path target/coverage/lcov.info
 	$(COVERAGE_REPORT) --html --output-dir target/coverage/html
 	$(COVERAGE_REPORT) --fail-under-lines $(COVERAGE_MIN_LINES)
+
+mutants: ## Mutation-test the modules in .cargo/mutants.toml (needs cargo-mutants); fails on any surviving mutant
+	CARGO_TARGET_DIR=$(CURDIR)/target/mutants cargo-mutants mutants --no-shuffle
 
 deploy-demo: build ## Deploy an app, show history, lint config
 	./scripts/deploy-demo.sh
